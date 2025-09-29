@@ -1,22 +1,27 @@
 #!/usr/bin/env bun
 /**
  * Website Accessibility Crawler
- * Crawls a website and generates an accessibility report using axe-core
+ * Crawls a website and generates an accessibility report using axe-core and Lighthouse
  *
  * Usage: bun run crawler.ts <url> [options]
  * Options:
  *   --max-pages <number>  Maximum number of pages to crawl (default: 10)
- *   --output <file>       Output file name (default: accessibility-report.md)
+ *   --output <file>       Output file name (default: reports/{hostname}-{datetime}.md)
  */
 
 import { chromium } from "playwright";
 import type { Browser, BrowserContext, Page } from "playwright";
 import AxeBuilder from "@axe-core/playwright";
 import type { AxeResults } from "axe-core";
+import lighthouse from "lighthouse";
+import type { Result as LighthouseResult } from "lighthouse";
+import { writeFileSync, mkdirSync } from "fs";
+import { join } from "path";
 
 interface PageResult {
   url: string;
-  results: AxeResults;
+  axeResults: AxeResults;
+  lighthouseResults: LighthouseResult | null;
   timestamp: string;
 }
 
@@ -27,6 +32,7 @@ class AccessibilityCrawler {
   private baseUrl: string;
   private maxPages: number;
   private results: PageResult[] = [];
+  private cdpPort = 9222;
 
   constructor(startUrl: string, maxPages = 10) {
     this.baseUrl = new URL(startUrl).origin;
@@ -34,7 +40,9 @@ class AccessibilityCrawler {
   }
 
   async initialize() {
-    this.browser = await chromium.launch();
+    this.browser = await chromium.launch({
+      args: [`--remote-debugging-port=${this.cdpPort}`],
+    });
     this.context = await this.browser.newContext();
   }
 
@@ -66,11 +74,26 @@ class AccessibilityCrawler {
       await page.goto(normalizedUrl, { waitUntil: "networkidle" });
 
       // Run axe accessibility tests
-      const results = await new AxeBuilder({ page }).analyze();
+      const axeResults = await new AxeBuilder({ page }).analyze();
+
+      // Run Lighthouse accessibility audit
+      let lighthouseResults: LighthouseResult | null = null;
+      try {
+        const lhr = await lighthouse(normalizedUrl, {
+          port: this.cdpPort,
+          output: "json",
+          onlyCategories: ["accessibility"],
+          disableStorageReset: true,
+        });
+        lighthouseResults = lhr?.lhr || null;
+      } catch (error) {
+        console.error(`Lighthouse error for ${normalizedUrl}:`, error);
+      }
 
       this.results.push({
         url: normalizedUrl,
-        results,
+        axeResults,
+        lighthouseResults,
         timestamp: new Date().toISOString(),
       });
 
@@ -125,25 +148,45 @@ class AccessibilityCrawler {
 
     // Summary statistics
     const totalViolations = this.results.reduce(
-      (sum, r) => sum + r.results.violations.length,
+      (sum, r) => sum + r.axeResults.violations.length,
       0
     );
     const criticalIssues = this.results.reduce(
       (sum, r) =>
         sum +
-        r.results.violations.filter((v) => v.impact === "critical").length,
+        r.axeResults.violations.filter((v) => v.impact === "critical").length,
       0
     );
     const seriousIssues = this.results.reduce(
       (sum, r) =>
-        sum + r.results.violations.filter((v) => v.impact === "serious").length,
+        sum +
+        r.axeResults.violations.filter((v) => v.impact === "serious").length,
       0
     );
 
+    // Lighthouse scores
+    const lighthouseScores = this.results
+      .filter((r) => r.lighthouseResults)
+      .map((r) => r.lighthouseResults!.categories.accessibility.score! * 100);
+    const avgLighthouseScore =
+      lighthouseScores.length > 0
+        ? (
+            lighthouseScores.reduce((a, b) => a + b, 0) /
+            lighthouseScores.length
+          ).toFixed(1)
+        : "N/A";
+
     markdown += `## Summary\n\n`;
+    markdown += `### Axe-core Results\n\n`;
     markdown += `- **Total Violations:** ${totalViolations}\n`;
     markdown += `- **Critical Issues:** ${criticalIssues}\n`;
     markdown += `- **Serious Issues:** ${seriousIssues}\n\n`;
+    markdown += `### Lighthouse Results\n\n`;
+    markdown += `- **Average Accessibility Score:** ${avgLighthouseScore}${
+      typeof avgLighthouseScore === "string" && avgLighthouseScore !== "N/A"
+        ? "/100"
+        : ""
+    }\n\n`;
 
     markdown += `---\n\n`;
 
@@ -154,23 +197,54 @@ class AccessibilityCrawler {
         pageResult.timestamp
       ).toLocaleString()}\n\n`;
 
-      if (pageResult.results.violations.length === 0) {
-        markdown += `✅ **No violations found!**\n\n`;
+      // Lighthouse score
+      if (pageResult.lighthouseResults) {
+        const score =
+          pageResult.lighthouseResults.categories.accessibility.score! * 100;
+        const emoji = score >= 90 ? "🟢" : score >= 50 ? "🟡" : "🔴";
+        markdown += `### ${emoji} Lighthouse Accessibility Score: ${score.toFixed(
+          0
+        )}/100\n\n`;
+
+        // Lighthouse audits
+        const audits = pageResult.lighthouseResults.audits;
+        const failedAudits = Object.values(audits).filter(
+          (audit) =>
+            audit.score !== null &&
+            audit.score < 1 &&
+            audit.scoreDisplayMode !== "notApplicable"
+        );
+
+        if (failedAudits.length > 0) {
+          markdown += `**Lighthouse Issues (${failedAudits.length}):**\n\n`;
+          for (const audit of failedAudits) {
+            markdown += `- **${audit.title}**\n`;
+            if (audit.description) {
+              markdown += `  ${audit.description}\n`;
+            }
+          }
+          markdown += `\n`;
+        }
+      }
+
+      // Axe results
+      if (pageResult.axeResults.violations.length === 0) {
+        markdown += `### ✅ Axe-core: No violations found!\n\n`;
       } else {
-        markdown += `### Violations (${pageResult.results.violations.length})\n\n`;
+        markdown += `### Axe-core Violations (${pageResult.axeResults.violations.length})\n\n`;
 
         // Group by impact
         const byImpact = {
-          critical: pageResult.results.violations.filter(
+          critical: pageResult.axeResults.violations.filter(
             (v) => v.impact === "critical"
           ),
-          serious: pageResult.results.violations.filter(
+          serious: pageResult.axeResults.violations.filter(
             (v) => v.impact === "serious"
           ),
-          moderate: pageResult.results.violations.filter(
+          moderate: pageResult.axeResults.violations.filter(
             (v) => v.impact === "moderate"
           ),
-          minor: pageResult.results.violations.filter(
+          minor: pageResult.axeResults.violations.filter(
             (v) => v.impact === "minor"
           ),
         };
@@ -260,13 +334,21 @@ async function main() {
       ? parseInt(args[maxPagesIndex + 1]!) || 10
       : 10;
 
-  // Generate default filename from URL
+  // Generate default filename from URL with datetime
   const urlHostname = new URL(startUrl).hostname.replace(/\./g, "-");
+  const datetime = new Date().toISOString().replace(/[:.]/g, "-").slice(0, -5);
   const outputIndex = args.indexOf("--output");
   const outputFile =
     outputIndex !== -1 && args[outputIndex + 1]
       ? args[outputIndex + 1]
-      : `${urlHostname}-accessibility-report.md`;
+      : join("reports", `${urlHostname}-${datetime}.md`);
+
+  // Ensure reports directory exists
+  try {
+    mkdirSync("reports", { recursive: true });
+  } catch (e) {
+    // Directory might already exist
+  }
 
   console.log("🔍 Starting accessibility crawl...");
   console.log(`URL: ${startUrl}`);
@@ -279,7 +361,7 @@ async function main() {
     await crawler.crawl(startUrl);
 
     const report = crawler.generateMarkdownReport();
-    await Bun.write(outputFile!, report);
+    writeFileSync(outputFile!, report);
 
     console.log(`\n✅ Report generated: ${outputFile}`);
   } catch (error) {
