@@ -1,0 +1,23 @@
+{
+  "name": "accessible",
+  "version": "1.0.0",
+  "description": "Automated website accessibility crawler using axe-core and Playwright",
+  "author": "Charles Kihe",
+  "license": "MIT",
+  "private": true,
+  "main": "crawler.ts",
+  "scripts": {
+    "crawl": "bun run crawler.ts"
+  },
+  "devDependencies": {
+    "@types/bun": "latest"
+  },
+  "peerDependencies": {
+    "typescript": "^5"
+  },
+  "dependencies": {
+    "@axe-core/playwright": "^4.10.2",
+    "axe-core": "^4.10.3",
+    "playwright": "^1.55.1"
+  }
+}
