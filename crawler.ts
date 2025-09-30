@@ -59,7 +59,8 @@ class AccessibilityCrawler {
 
     if (
       this.visitedUrls.has(normalizedUrl) ||
-      !this.isInternalUrl(normalizedUrl)
+      !this.isInternalUrl(normalizedUrl) ||
+      !this.isWebPage(normalizedUrl)
     ) {
       return;
     }
@@ -138,6 +139,47 @@ class AccessibilityCrawler {
       return new URL(url).origin === this.baseUrl;
     } catch {
       return false;
+    }
+  }
+
+  private isWebPage(url: string): boolean {
+    try {
+      const pathname = new URL(url).pathname.toLowerCase();
+      const fileExtensions = [
+        ".pdf",
+        ".zip",
+        ".doc",
+        ".docx",
+        ".xls",
+        ".xlsx",
+        ".ppt",
+        ".pptx",
+        ".jpg",
+        ".jpeg",
+        ".png",
+        ".gif",
+        ".svg",
+        ".webp",
+        ".ico",
+        ".mp4",
+        ".avi",
+        ".mov",
+        ".wmv",
+        ".mp3",
+        ".wav",
+        ".xml",
+        ".json",
+        ".csv",
+        ".txt",
+        ".dmg",
+        ".exe",
+        ".pkg",
+        ".deb",
+        ".rpm",
+      ];
+      return !fileExtensions.some((ext) => pathname.endsWith(ext));
+    } catch {
+      return true;
     }
   }
 
